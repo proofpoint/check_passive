@@ -1,0 +1,252 @@
+#!/usr/bin/env perl
+# /* Copyright 2010 Proofpoint, Inc. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# */
+
+
+# TODO explicit fqdn
+# TODO check command timeout?
+
+=head1 NAME
+
+check_passive - Perform passive nagios checks based NRPE configuration
+
+=head1 SYNOPSIS
+
+   check_passive [options] service [service [...]]
+      --check service=check_name  Specify service is checked with check_name
+      --nrpe  config=file         Specify NRPE config (/etc/nagios/nrpe.cfg)
+      --nsca  config=file         Specify send_nsca config (/etc/send_nsca.cfg)
+              host=name|ip        Specify host/address (nagios)
+              command=exe         Specify send_nsca command (send_nsca)
+              port=#              Specify port number (5667)
+              timeout=#           Specify send_nsca timeout
+      Other options as described in Optconfig
+
+=head1 DESCRIPTION
+
+The check_passive command checks all the services on the local machine named
+on the command line, checking them with the Nagios plugin named in one of
+the B<--check> options (or as specified in the configuration file).
+
+The check command can either refer to an NRPE-configured check command
+appearing in the NRPE config file (C</etc/nagios/nrpe.cfg> by default), or it
+can itself be a Nagios plugin command-line. However the check command is
+arrived at, it's expected to comply with the Nagios plugin guidelines with
+regard to output and exit codes.
+
+Once all checks are run, it sends the results in a single session using
+the Nagios::NSCA module.
+
+=head2 Determination of Hostname
+
+The check_passive command does not try to determine the hostname, but the
+Nagios::NSCA command does fill in a default similar to a Facter-determined
+FQDN.
+
+=head1 FILES
+
+=over 4
+
+=item *
+
+C</opt/pptools/etc/check_passive.conf>
+
+=item *
+
+C<~/.check_passive>
+
+=item *
+
+C</etc/send_nsca.cfg>
+
+=item *
+
+C</etc/nagios/nrpe.cfg>
+
+=back
+
+=head1 AUTHOR
+
+Jeremy Brinkley, E<lt>jbrinkley@proofpoint.comE<gt>
+
+=cut
+
+
+use strict;
+# use warnings;
+use lib '/opt/pptools';
+use ppenv;
+use Optconfig;
+use Data::Dumper;
+use Text::ParseWords;
+use Sys::Syslog;
+use Carp;
+use Nagios::NRPE::Config;
+use Nagios::NSCA;
+
+use vars qw($me $opt $VERSION $logger);
+
+$me = 'check_passive';
+
+$VERSION = '__VERSION__';
+
+$opt = Optconfig->new($me, {
+   'check=s%' => undef,
+   'nrpe=s%' => { 'config' => '/etc/nagios/nrpe.cfg' },
+   'nsca=s%' => {
+      'command' => 'send_nsca',
+      'host' => 'nagios',
+      'port' => 5667,
+      'timeout' => 10,
+      'config' => '/etc/send_nsca.cfg' } });
+
+openlog($me, 'ndelay,pid,nofatal', 'daemon');
+
+$logger = sub { syslog(@_); };
+
+$opt->{'logger'} = $logger;
+
+copyconf($opt,
+         [qw(nrpe nsca)], [qw(debug verbose dry-run logger)]);
+
+dbg("config = " . ddump($opt));
+
+my $nrpe = Nagios::NRPE::Config->new($opt->{'nrpe'});
+my $nsca = Nagios::NSCA->new($opt->{'nsca'});
+
+my $result = { };
+
+for my $service (@ARGV) {
+   if (! exists($opt->{'check'}->{$service})) {
+      wrn("Undefined service: $service");
+      next;
+   }
+
+   vrb("Preparing to check $service");
+   
+   my $check = $opt->{'check'}->{$service};
+
+   dbg("Found check '$check' for service '$service'");
+   
+   my @cmd = ();
+   if (exists($nrpe->{'command'}->{$check})) {
+      dbg("check command $check found in NRPE config file");
+      @cmd = shellwords($nrpe->{'command'}->{$check});
+   } else {
+      dbg("check command $check treated as raw command");
+      @cmd = shellwords($check);
+   }
+
+   unless (-x $cmd[0]) {
+      wrn("Service check command executable $cmd[0] "
+          . "does not exist or is not executable");
+      $result->{$service} = { 'output' =>
+                                  "(check_passive could not execute $cmd[0])",
+                                  'result' => 3 };
+      next;
+   }
+
+   eval {
+      $result->{$service} = run_check_cmd(@cmd);
+   };
+   if ($@) {
+      wrn("Could not run check for $service ($check): $@");
+   }
+}
+
+dbg("Results: " . ddump($result));
+
+if (keys %$result) {
+   my $nsca = Nagios::NSCA->new($opt->{'nsca'});
+   for my $service (keys %$result) {
+      $nsca->add(
+         { service => $service, %{$result->{$service}} });
+   }
+   eval {
+      $nsca->send;
+   };
+   if ($@) {
+      fatal("Could not sumbit check results: $@");
+   }
+}
+
+sub run_check_cmd {
+   my @cmd = @_;
+   my $exitcode = 3;
+   my $output = "($me internal error, never ran command)";
+
+   dbg("running: " . join(' ', @cmd));
+
+   if (my $pid = open(my $child, '-|')) {
+      # parent
+      $output = <$child>;
+      chomp($output);
+      # only one line of output--nsca can't handle more than one
+      close($child);
+      # waitpid($pid, 0);
+      my $rv = $?; # close() is what waits for children opened by open() ?
+      if ($rv == -1) {
+         $exitcode = 3;
+         $output .= " (couldn't execute " . join(' ', @cmd) . ": $!)";
+      } elsif ($rv & 127) {
+         $exitcode = 3;
+         $output .= sprintf(' (%s died with signal %d)',
+                            join(' ', @cmd), $rv & 127);
+      } else {
+         $exitcode = $rv >> 8;
+      }
+   } else {
+      # child
+      exec(@cmd);
+   }
+
+   return { 'result' => $exitcode, 'output' => $output };
+}
+
+sub copyconf {
+   my ($opt, $confs, $keys) = @_;
+
+   for my $conf (@$confs) {
+      for my $key (@$keys) {
+         $opt->{$conf}->{$key} = $opt->{$key};
+      }
+   }
+}
+
+sub wrn {
+   print STDERR "$me warning: ", join("\n   ", @_), "\n";
+   $logger->('warning', join(' ', @_));
+}
+
+sub vrb {
+   $opt->vrb(1, @_);
+   $logger->('info', join(' ', @_));
+}
+
+sub dbg {
+   $opt->dbg(1, @_);
+   $logger->('debug', join(' ', @_))
+       if $opt->{'debug'};
+}
+
+sub fatal {
+   $logger->('crit', join(' ', @_));
+   croak @_;
+}
+
+sub ddump {
+   my $v = 'v0';
+   Data::Dumper->new([@_],[map { $v++ } @_])->Terse(1)->Indent(0)->Dump;
+}

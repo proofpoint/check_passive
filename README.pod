@@ -1,0 +1,64 @@
+=head1 NAME
+
+check_passive - Perform passive nagios checks based NRPE configuration
+
+=head1 SYNOPSIS
+
+   check_passive [options] service [service [...]]
+      --check service=check_name  Specify service is checked with check_name
+      --nrpe  config=file         Specify NRPE config (/etc/nagios/nrpe.cfg)
+      --nsca  config=file         Specify send_nsca config (/etc/send_nsca.cfg)
+              host=name|ip        Specify host/address (nagios)
+              command=exe         Specify send_nsca command (send_nsca)
+              port=#              Specify port number (5667)
+              timeout=#           Specify send_nsca timeout
+      Other options as described in Optconfig
+
+=head1 DESCRIPTION
+
+The check_passive command checks all the services on the local machine named
+on the command line, checking them with the Nagios plugin named in one of
+the B<--check> options (or as specified in the configuration file).
+
+The check command can either refer to an NRPE-configured check command
+appearing in the NRPE config file (C</etc/nagios/nrpe.cfg> by default), or it
+can itself be a Nagios plugin command-line. However the check command is
+arrived at, it's expected to comply with the Nagios plugin guidelines with
+regard to output and exit codes.
+
+Once all checks are run, it sends the results in a single session using
+the Nagios::NSCA module.
+
+=head2 Determination of Hostname
+
+The check_passive command does not try to determine the hostname, but the
+Nagios::NSCA command does fill in a default similar to a Facter-determined
+FQDN.
+
+=head1 FILES
+
+=over 4
+
+=item *
+
+C</opt/pptools/etc/check_passive.conf>
+
+=item *
+
+C<~/.check_passive>
+
+=item *
+
+C</etc/send_nsca.cfg>
+
+=item *
+
+C</etc/nagios/nrpe.cfg>
+
+=back
+
+=head1 AUTHOR
+
+Jeremy Brinkley, E<lt>jbrinkley@proofpoint.comE<gt>
+
+=cut
