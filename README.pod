@@ -1,6 +1,6 @@
 =head1 NAME
 
-check_passive - Perform passive nagios checks based NRPE configuration
+check_passive - Perform passive nagios checks based on NRPE configuration
 
 =head1 SYNOPSIS
 
